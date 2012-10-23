@@ -39,9 +39,11 @@ all() -> [
          ].
 
 groups() -> [
-             {basic, [], [
-                          %% basic_emptystate
-                            basic_newnode
+             {basic, [sequence], [
+                            basic_emptystate,
+                            basic_newnode,
+                            basic_removenode,
+                            basic_editnode
                          ]}
             ].
 
@@ -78,6 +80,7 @@ init_per_testcase(CaseName, Config) ->
     escalus:init_per_testcase(CaseName, Config).
 
 end_per_testcase(CaseName, Config) ->
+    timer:sleep(1000),
     escalus:end_per_testcase(CaseName, Config).
 
 
@@ -94,7 +97,7 @@ basic_emptystate(Config) ->
     end).
 
 basic_newnode(Config) ->
-    escalus:story(Config, [1, 1, 1], fun(Alice, Bob, Mike) ->
+    escalus:story(Config, [1, 1], fun(Alice, Bob) ->
         escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
         escalus:wait_for_stanzas(Alice, 3),
         El1 = stanza_new_node({element, <<"line-1">>, <<"line">>, <<"document">>}),
@@ -103,23 +106,68 @@ basic_newnode(Config) ->
         escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
 
         escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
-        Stanzas = escalus:wait_for_stanzas(Bob, 3),
-
-        El3 = stanza_remove(<<"line-2">>),
-        Packet2 = stanza_nodes([El3]),
-        error_logger:info_msg("~p~n", [Packet2]),
-        escalus:send(Alice, stanza_to_room(Packet2, ?config(room, Config))),
-
-        timer:sleep(2000),
-        escalus:send(Mike, stanza_muc_enter_room(?config(room, Config), <<"mike">>)),
-        Stanzas2 = escalus:wait_for_stanzas(Mike, 3),
-        error_logger:info_msg("~p~n", [Stanzas2])
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 3)),
+        true = has_element(Msg, El1),
+        true = has_element(Msg, El2)
     end).
 
+basic_removenode(Config) ->
+    escalus:story(Config, [1, 1], fun(Alice, Bob) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        El = stanza_remove(<<"line-2">>),
+        Packet = stanza_nodes([El]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+
+        El1 = stanza_new_node({element, <<"line-1">>, <<"line">>, <<"document">>}),
+        El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"This is text">>}),
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 3)),
+        true = has_element(Msg, El1),
+        false = has_element(Msg, El2)
+    end).
+
+
+basic_editnode(Config) ->
+    escalus:story(Config, [1, 1, 1], fun(Alice, Bob, Mike) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        
+        El = stanza_new_node({text, <<"line-3">>, <<"line">>, <<"document">>, <<"Magic!">>}),
+        ElAfter = stanza_new_node({text, <<"line-3">>, <<"line">>, <<"line-1">>, <<"Magic!">>}),
+        Packet = stanza_nodes([El]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        
+        escalus:wait_for_stanza(Alice),
+        
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 3)),
+        true = has_element(Msg, El),
+        false = has_element(Msg, ElAfter),
+        
+        El2 = stanza_set(<<"line-3">>, [{<<"parent">>, <<"line-1">>}]),
+        escalus:send(Alice, stanza_to_room(stanza_nodes([El2]), ?config(room, Config))),
+
+        timer:sleep(1000),
+        escalus:send(Mike, stanza_muc_enter_room(?config(room, Config), <<"mike">>)),
+        Msg2 = get_message(escalus:wait_for_stanzas(Mike, 3)),
+        false = has_element(Msg2, El),
+        true = has_element(Msg2, ElAfter)
+
+    end).
 
 %%--------------------------------------------------------------------
 %% Helpers
 %%--------------------------------------------------------------------
+get_message(Stanzas) ->
+    [Msg] = lists:filter(fun(#xmlelement{name = <<"message">>}) ->  true;
+                            (_) -> false
+                         end, Stanzas),
+    Msg.
+
+stanza_set(TargetId, Props) ->
+    #xmlelement{name = <<"set">>,
+                attrs = [{<<"target">>, TargetId} | Props]}.
 
 stanza_remove(Id) ->
     #xmlelement{name = <<"remove">>,
@@ -161,6 +209,12 @@ has_state(Msg) ->
         exml_query:attr(DocEnd, <<"last-id">>) /= undefined andalso
         exml_query:subelement(State, <<"new">>) /= undefined.
 
+has_element(Msg, El) ->
+    Elements = (exml_query:path(Msg, [{element, <<"sxe">>}, {element, <<"state">>}]))#xmlelement.children,
+    lists:any(fun(Item) -> 
+                Item#xmlelement.name =:= El#xmlelement.name andalso
+                Item#xmlelement.attrs -- El#xmlelement.attrs =:= []
+              end, Elements).
 
 nick(User) -> escalus_utils:get_username(User).
 
@@ -294,7 +348,7 @@ stanza_change_nick(Room, NewNick) ->
 
 start_room(Config, User, Room, Nick, Opts) ->
     From = generate_rpc_jid(User),
-    escalus_ejabberd:rpc(mod_muc, create_instant_room,
+    escalus_ejabberd:rpc(mod_sxe, create_instant_room,
         [<<"localhost">>, Room, From, Nick,
             Opts]),
     [{nick, Nick}, {room, Room} | Config].
