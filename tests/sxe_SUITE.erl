@@ -35,7 +35,8 @@
 %%--------------------------------------------------------------------
 
 all() -> [
-          {group, basic}
+          {group, basic},
+          {group, moderated}
          ].
 
 groups() -> [
@@ -43,8 +44,13 @@ groups() -> [
                             basic_emptystate,
                             basic_newnode,
                             basic_removenode,
-                            basic_editnode
-                         ]}
+                            basic_editnode,
+                            basic_removeorphans
+                         ]},
+             {moderated, [sequence], [
+                            moderated_simple,
+                            moderated_denied
+                        ]}
             ].
 
 suite() ->
@@ -66,12 +72,25 @@ init_per_group(basic, Config) ->
     start_room(Config1, Alice, <<"testroom">>, <<"testowner">>,
         [{persistent, true}]);
 
+init_per_group(moderated, Config) ->
+      RoomName = <<"testroom">>,
+      RoomNick = <<"testowner">>,
+      Config1 = escalus:create_users(Config),
+      [Alice | _] = ?config(escalus_users, Config1),
+      start_room(Config1, Alice, RoomName, RoomNick,
+                         [{persistent, true}, {allow_change_subj, false}, {moderated, true},
+                                   {members_by_default, false}]);
+
 init_per_group(_GroupName, Config) ->
     escalus:create_users(Config).
 
 end_per_group(basic, Config) ->
     destroy_room(Config),
     escalus:delete_users(Config);
+
+end_per_group(moderated, Config) ->
+      destroy_room(Config),
+      escalus:delete_users(Config);
 
 end_per_group(_GroupName, Config) ->
     escalus:delete_users(Config).
@@ -104,11 +123,12 @@ basic_newnode(Config) ->
         El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"This is text">>}),
         Packet = stanza_nodes([El1, El2]),
         escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        escalus:wait_for_stanza(Alice),
 
         escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
-        Msg = get_message(escalus:wait_for_stanzas(Bob, 3)),
-        true = has_element(Msg, El1),
-        true = has_element(Msg, El2)
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
+        true = has_state_element(Msg, El1),
+        true = has_state_element(Msg, El2)
     end).
 
 basic_removenode(Config) ->
@@ -118,15 +138,16 @@ basic_removenode(Config) ->
         El = stanza_remove(<<"line-2">>),
         Packet = stanza_nodes([El]),
         escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        Msg2 = escalus:wait_for_stanza(Alice),
+        true = has_element(Msg2, El),
 
         El1 = stanza_new_node({element, <<"line-1">>, <<"line">>, <<"document">>}),
         El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"This is text">>}),
         escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
-        Msg = get_message(escalus:wait_for_stanzas(Bob, 3)),
-        true = has_element(Msg, El1),
-        false = has_element(Msg, El2)
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
+        true = has_state_element(Msg, El1),
+        false = has_state_element(Msg, El2)
     end).
-
 
 basic_editnode(Config) ->
     escalus:story(Config, [1, 1, 1], fun(Alice, Bob, Mike) ->
@@ -137,30 +158,137 @@ basic_editnode(Config) ->
         ElAfter = stanza_new_node({text, <<"line-3">>, <<"line">>, <<"line-1">>, <<"Magic!">>}),
         Packet = stanza_nodes([El]),
         escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
-        
         escalus:wait_for_stanza(Alice),
         
         escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
-        Msg = get_message(escalus:wait_for_stanzas(Bob, 3)),
-        true = has_element(Msg, El),
-        false = has_element(Msg, ElAfter),
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
+        true = has_state_element(Msg, El),
+        false = has_state_element(Msg, ElAfter),
         
         El2 = stanza_set(<<"line-3">>, [{<<"parent">>, <<"line-1">>}]),
         escalus:send(Alice, stanza_to_room(stanza_nodes([El2]), ?config(room, Config))),
+        escalus:wait_for_stanza(Alice),
+        Msg3 = escalus:wait_for_stanza(Alice),
+        true = has_element(Msg3, El2),
+        Msg4 = escalus:wait_for_stanza(Bob), 
+        true = has_element(Msg4, El2),   
 
         timer:sleep(1000),
         escalus:send(Mike, stanza_muc_enter_room(?config(room, Config), <<"mike">>)),
-        Msg2 = get_message(escalus:wait_for_stanzas(Mike, 3)),
-        false = has_element(Msg2, El),
-        true = has_element(Msg2, ElAfter)
+        Msg2 = get_message(escalus:wait_for_stanzas(Mike, 5)),
+        false = has_state_element(Msg2, El),
+        true = has_state_element(Msg2, ElAfter)
 
+    end).
+
+basic_removeorphans(Config) ->
+    escalus:story(Config, [1, 1, 1], fun(Alice, Bob, Mike) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        El0 = stanza_new_node({element, <<"line-1">>, <<"line">>, <<"document">>}),
+        El1 = stanza_new_node({text, <<"line-4">>, <<"line">>, <<"line-1">>, <<"Well, hey, this is text too!">>}),
+        El2 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"line-4">>, <<"This is text">>}),
+        El3 = stanza_new_node({text, <<"line-6">>, <<"line">>, <<"document">>, <<"True magic">>}),
+        Packet = stanza_nodes([El1, El2, El3]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        Msg2 = escalus:wait_for_stanza(Alice),
+        true = has_element(Msg2, El1),
+        true = has_element(Msg2, El2),
+        true = has_element(Msg2, El3),
+
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        Stanzas = escalus:wait_for_stanzas(Bob, 4),
+        Msg = get_message(Stanzas),
+        true = has_state_element(Msg, El0),
+        true = has_state_element(Msg, El1),
+        true = has_state_element(Msg, El2),
+        true = has_state_element(Msg, El3),
+
+        RemEl0 = stanza_remove(<<"line-1">>),
+        escalus:send(Alice, stanza_to_room(stanza_nodes([RemEl0]), ?config(room, Config))),
+        Msg3 = get_message(escalus:wait_for_stanzas(Alice, 2)),
+        true = has_element(Msg3, RemEl0),
+        Msg4 = escalus:wait_for_stanza(Bob),
+        true = has_element(Msg4, RemEl0),
+
+        timer:sleep(1000),
+        escalus:send(Mike, stanza_muc_enter_room(?config(room, Config), <<"mike">>)),
+        Msg1 = get_message(escalus:wait_for_stanzas(Mike, 5)),
+        false = has_state_element(Msg1, El0),
+        false = has_state_element(Msg1, El1),
+        false = has_state_element(Msg1, El2),
+        true = has_state_element(Msg1, El3)
+    end).
+
+moderated_simple(Config) ->        
+      escalus:story(Config, [1,1], fun(Alice, Bob) ->
+        %% Alice joins room      
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        %% Bob joins room             
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        escalus:wait_for_stanzas(Bob, 4),
+        %% Skip Bob's presence        
+        escalus:wait_for_stanza(Alice),
+
+        %% Alice grants voice to Bob  
+        escalus:send(Alice, stanza_set_roles(?config(room,Config),
+                                             [{<<"bob">>,<<"participant">>}])),
+
+        %% Alice receives success information and new Bob's presence
+        Pred = fun(Stanza) ->         
+            is_presence_with_role(Stanza, <<"participant">>) andalso
+            escalus_pred:is_stanza_from(
+              room_address(?config(room, Config), <<"bob">>), Stanza)
+        end,                      
+        escalus:assert_many([is_iq_result, Pred],
+                            escalus:wait_for_stanzas(Alice, 2)),
+
+        %% Bob should receive his new presence
+        escalus:assert(Pred, escalus:wait_for_stanza(Bob)),
+        
+        El1 = stanza_new_node({element, <<"line-1">>, <<"line">>, <<"document">>}),
+        El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"This is text">>}),
+        Packet = stanza_nodes([El1, El2]),
+        escalus:send(Bob, stanza_to_room(Packet, ?config(room, Config))),
+        Msg = escalus:wait_for_stanza(Bob),
+        true = has_element(Msg, El1),
+        true = has_element(Msg, El2),
+        Msg1 = escalus:wait_for_stanza(Alice),
+        true = has_element(Msg1, El1),
+        true = has_element(Msg1, El2)
+    end).
+
+moderated_denied(Config) ->        
+      escalus:story(Config, [1,1], fun(Alice, Bob) ->
+        %% Alice joins room      
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        %% Bob joins room             
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        escalus:wait_for_stanzas(Bob, 4),
+        %% Skip Bob's presence        
+        escalus:wait_for_stanza(Alice),
+
+        El1 = stanza_new_node({element, <<"line-1">>, <<"line">>, <<"document">>}),
+        El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"This is text">>}),
+        Packet = stanza_nodes([El1, El2]),
+        escalus:send(Bob, stanza_to_room(Packet, ?config(room, Config))),
+        Err = escalus:wait_for_stanza(Bob),
+        escalus_assert:is_error(Err, <<"auth">>, <<"forbidden">>),
+        escalus_assert:has_no_stanzas(Bob),
+        escalus_assert:has_no_stanzas(Alice)
     end).
 
 %%--------------------------------------------------------------------
 %% Helpers
 %%--------------------------------------------------------------------
 get_message(Stanzas) ->
-    [Msg] = lists:filter(fun(#xmlelement{name = <<"message">>}) ->  true;
+    [Msg] = lists:filter(fun(#xmlelement{name = <<"message">>} = El) ->
+                            case exml_query:attr(El, <<"type">>) of
+                                <<"sxe">> ->  true;
+                                _ -> false
+                            end;
                             (_) -> false
                          end, Stanzas),
     Msg.
@@ -200,6 +328,7 @@ is_sxe_message(Msg) ->
     exml_query:attr(Msg, <<"type">>) == <<"sxe">> andalso
         exml_query:path(Msg, [{element, <<"sxe">>}]) /= undefined.
 
+
 has_state(Msg) ->
     State = exml_query:path(Msg, [{element, <<"sxe">>}, {element, <<"state">>}]),
     DocBeg = exml_query:subelement(State, <<"document-begin">>),
@@ -209,125 +338,19 @@ has_state(Msg) ->
         exml_query:attr(DocEnd, <<"last-id">>) /= undefined andalso
         exml_query:subelement(State, <<"new">>) /= undefined.
 
-has_element(Msg, El) ->
+has_state_element(Msg, El) ->
     Elements = (exml_query:path(Msg, [{element, <<"sxe">>}, {element, <<"state">>}]))#xmlelement.children,
     lists:any(fun(Item) -> 
                 Item#xmlelement.name =:= El#xmlelement.name andalso
                 Item#xmlelement.attrs -- El#xmlelement.attrs =:= []
               end, Elements).
 
-nick(User) -> escalus_utils:get_username(User).
-
-is_history_message_correct(Room, SenderNick,Type,  Text, ReceivedMessage) ->
-    %error_logger:info_msg("tested message: ~n~p~n", [ReceivedMessage]),
-    escalus_pred:is_message(ReceivedMessage),
-	exml_query:path(ReceivedMessage, [{element, <<"delay">>}, {attr, <<"stamp">>}]),
-	FromDelay = room_address(Room),
-	FromDelay = exml_query:path(ReceivedMessage, [{element, <<"delay">>}, {attr, <<"from">>}]),
-    From = room_address(Room, SenderNick),
-    From = exml_query:attr(ReceivedMessage, <<"from">>),
-    Type = exml_query:attr(ReceivedMessage, <<"type">>),
-	Content = exml_query:path(ReceivedMessage, [{element, <<"body">>}, cdata]),
-	Text = Content.
-
-is_non_anonymous_history_message_correct(Room, SenderNick,Type,  Text, ReceivedMessage) ->
-    %error_logger:info_msg("tested message: ~n~p~n", [ReceivedMessage]),
-    escalus_pred:is_message(ReceivedMessage),
-	exml_query:path(ReceivedMessage, [{element, <<"delay">>}, {attr, <<"stamp">>}]),
-	FromDelay = room_address(Room),
-	FromDelay = exml_query:path(ReceivedMessage, [{element, <<"delay">>}, {attr, <<"from">>}]),
-    From = room_address(Room, SenderNick),
-    From = exml_query:attr(ReceivedMessage, <<"from">>),
-    Type = exml_query:attr(ReceivedMessage, <<"type">>),
-	Content = exml_query:path(ReceivedMessage, [{element, <<"body">>}, cdata]),
-	Text = Content,
-	<<"http://jabber.org/protocol/address">> = exml:path(ReceivedMessage, [{element, <<"addresses">>}, {attr, <<"xmlns">>}]),
-	<<"oform">> = exml:path(ReceivedMessage, [{element, <<"addresses">>},{element, <<"address">>}, {attr, <<"type">>}]),
-	JID = escalus_utils:get_jid(SenderNick),
-	JID= exml:path(ReceivedMessage, [{element, <<"addresses">>},{element, <<"address">>}, {attr, <<"jid">>}]).
-
-is_self_presence(User, Room, Presence) ->
-		has_status_codes(Presence, [<<"110">>]),
-        escalus_pred:is_presence(Presence),
-		From = room_address(Room, escalus_utils:get_username(User)),
-        From = exml_query:attr(Presence, <<"from">>).
-
-is_presence_from(User, Room, Presence) ->
-        escalus_pred:is_presence(Presence),
-		From = room_address(Room, escalus_utils:get_username(User)),
-        From = exml_query:attr(Presence, <<"from">>).
-
-
-%does not check the jid - the user might not be entitled to receive it.
-is_availability_status_notification_correct(Room, SenderNick, NewStatus, ReceivedMessage) ->
-    %error_logger:info_msg("tested message: ~n~p~n", [ReceivedMessage]),
-    escalus_pred:is_presence(ReceivedMessage),
-    From = room_address(Room, SenderNick),
-    From  = exml_query:attr(ReceivedMessage, <<"from">>),
-    NewStatus =  exml_query:path(ReceivedMessage, [{element, <<"status">>}, cdata]),
-    <<"xa">> = exml_query:path(ReceivedMessage, [{element, <<"show">>}, cdata]).
-
-is_item_list_empty(#xmlelement{children = [Query]}) ->
-    Query#xmlelement.children == [].
-
-is_message_correct(Room, SenderNick, Type, Text, ReceivedMessage) ->
-    %error_logger:info_msg("tested message: ~n~p~n", [ReceivedMessage]),
-    escalus_pred:is_message(ReceivedMessage),
-    From = room_address(Room, SenderNick),
-    From  = exml_query:attr(ReceivedMessage, <<"from">>),
-    Type  = exml_query:attr(ReceivedMessage, <<"type">>),
-    Body = #xmlelement{name = <<"body">>, children = [#xmlcdata{content=Text}]},
-    Body = exml_query:subelement(ReceivedMessage, <<"body">>).
-
-is_exit_message_correct(LeavingUser,Affiliation,Room, Message) ->
-	escalus_pred:is_presence_with_type(<<"unavailable">>,Message),
-	is_presence_with_affiliation(Message,Affiliation), 
-    From = room_address(Room, escalus_utils:get_username(LeavingUser)),
-    From  = exml_query:attr(Message, <<"from">>).
-
-is_exit_message_with_status_correct(LeavingUser,Affiliation,Room,Status,  Message) ->
-	escalus_pred:is_presence_with_type(<<"unavailable">>,Message),
-	is_presence_with_affiliation(Message,Affiliation), 
-    From = room_address(Room, escalus_utils:get_username(LeavingUser)),
-    From  = exml_query:attr(Message, <<"from">>),
-	Status = exml_query:path(Message, [{element,<<"status">>}, cdata]).
-
-is_nick_unavailable_correct(Room, OldNick, NewNick, ReceivedMessage) ->
-     %error_logger:info_msg("tested message: ~n~p~n", [ReceivedMessage]),
-    escalus_pred:is_message(ReceivedMessage),
-    From = room_address(Room, OldNick),
-    From = exml_query:attr(ReceivedMessage, <<"from">>),
-    has_status_codes(ReceivedMessage, [<<"303">>]),
-    NewNick = exml_query:path(ReceivedMessage, [{element, <<"x">>}, {element, <<"item">>},{attr, <<"nick">>}]).
-
-is_nick_update_correct(Room,NewNick, ReceivedMessage) ->
-    %error_logger:info_msg("tested message: ~n~p~n", [ReceivedMessage]),
-    escalus_pred:is_message(ReceivedMessage),
-    From = room_address(Room,NewNick),
-    From  = exml_query:attr(ReceivedMessage, <<"from">>).
-
-print_next_message(User) ->
-    error_logger:info_msg("~p messaege, ~n~p~n", [User, escalus:wait_for_stanza(User)]).
-
-print(Element) ->
-    error_logger:info_msg("~n~p~n", [Element]).
-
-generate_rpc_jid({_,User}) ->
-    {username, Username} = lists:keyfind(username, 1, User),
-    {server, Server} = lists:keyfind(server, 1, User),
-    %% esl-ejabberd uses different record to store jids
-     %JID = <<Username/binary, "@", Server/binary, "/rpc">>,
-     %{jid, JID, Username, Server, <<"rpc">>}.
-    {jid, Username, Server, <<"rpc">>, Username, Server, <<"rpc">>}.
-
-%Groupchat 1.0 protocol
-stanza_groupchat_enter_room(Room, Nick) ->
-    stanza_to_room(escalus_stanza:presence(<<"available">>), Room, Nick).
-
-
-stanza_groupchat_enter_room_no_nick(Room) ->
-    stanza_to_room(escalus_stanza:presence(<<"available">>), Room).
-
+has_element(Msg, El) ->
+    Elements = (exml_query:subelement(Msg, <<"sxe">>))#xmlelement.children,
+    lists:any(fun(Item) -> 
+                Item#xmlelement.name =:= El#xmlelement.name andalso
+                Item#xmlelement.attrs -- El#xmlelement.attrs =:= []
+              end, Elements).
 
 %Basic MUC protocol
 stanza_muc_enter_room(Room, Nick) ->
@@ -335,16 +358,6 @@ stanza_muc_enter_room(Room, Nick) ->
         escalus_stanza:presence(  <<"available">>,
                                 [#xmlelement{ name = <<"x">>, attrs=[{<<"xmlns">>, <<"http://jabber.org/protocol/muc">>}]}]),
         Room, Nick).
-
-stanza_muc_enter_password_protected_room(Room, Nick, Password) ->
-    stanza_to_room(
-        escalus_stanza:presence(  <<"available">>,
-                                [#xmlelement{ name = <<"x">>, attrs=[{<<"xmlns">>, <<"http://jabber.org/protocol/muc">>}],
-                                             children=[#xmlelement{name = <<"password">>, children = [#xmlcdata{content=[Password]}]} ]}]),
-        Room, Nick).
-
-stanza_change_nick(Room, NewNick) ->
-    stanza_to_room(escalus_stanza:presence(<<"available">>), Room, NewNick).
 
 start_room(Config, User, Room, Nick, Opts) ->
     From = generate_rpc_jid(User),
@@ -766,48 +779,12 @@ has_features(#xmlelement{children = [ Query ]}) ->
     <<"conference">> = exml_query:attr(Identity, <<"category">>),
     #xmlelement{name = _Name, attrs = _Attrs, children = _Body} = exml_query:subelement(Query, <<"feature">>).
 
-has_muc(#xmlelement{children = [ #xmlelement{children = Services} ]}) ->
-    %% should be along the lines of (taken straight from the XEP):
-    %% <iq from='shakespeare.lit'
-    %%     id='h7ns81g'
-    %%     to='hag66@shakespeare.lit/pda'
-    %%     type='result'>
-    %%   <query xmlns='http://jabber.org/protocol/disco#items'>
-    %%     <item jid='chat.shakespeare.lit'
-    %%           name='Chatroom Service'/>
-    %%   </query>
-    %% </iq>
-
-    %% is like this:
-    %% {xmlelement,<<"iq">>,
-    %%     [{<<"from">>,<<"localhost">>},
-    %%         {<<"to">>,<<"alice@localhost/res1">>},
-    %%         {<<"id">>,<<"a5eb1dc70826598893b15f1936b18a34">>},
-    %%         {<<"type">>,<<"result">>}],
-    %%     [{xmlelement,<<"query">>,
-    %%             [{<<"xmlns">>,
-    %%                     <<"http://jabber.org/protocol/disco#items">>}],
-    %%             [{xmlelement,<<"item">>,
-    %%                     [{<<"jid">>,<<"vjud.localhost">>}],
-    %%                     []},
-    %%                 {xmlelement,<<"item">>,
-    %%                     [{<<"jid">>,<<"pubsub.localhost">>}],
-    %%                     []},
-    %%                 {xmlelement,<<"item">>,
-    %%                     [{<<"jid">>,<<"muc.localhost">>}],
-    %%                     []},
-    %%                 {xmlelement,<<"item">>,
-    %%                     [{<<"jid">>,<<"irc.localhost">>}],
-    %%                     []}]}]}
-    %% how to obtaing output like the above? simply put this in the test case:
-    %% S = escalus:wait_for_stanza(Alice),
-    %% error_logger:info_msg("~p~n", [S]),
-    IsMUC = fun(Item) ->
-        exml_query:attr(Item, <<"jid">>) == ?MUC_HOST
-    end,
-    lists:any(IsMUC, Services).
 
 is_room_locked(Stanza) ->
     escalus_pred:is_presence(Stanza)
-    andalso
-    escalus_pred:is_error(<<"cancel">>, <<"item-not-found">>, Stanza).
+    andalso  escalus_pred:is_error(<<"cancel">>, <<"item-not-found">>, Stanza).
+
+generate_rpc_jid({_,User}) ->
+  {username, Username} = lists:keyfind(username, 1, User),
+  {server, Server} = lists:keyfind(server, 1, User),
+  {jid, Username, Server, <<"rpc">>, Username, Server, <<"rpc">>}.
