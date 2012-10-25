@@ -36,7 +36,8 @@
 
 all() -> [
           {group, basic},
-          {group, moderated}
+          {group, moderated},
+          {group, code}
          ].
 
 groups() -> [
@@ -50,6 +51,11 @@ groups() -> [
              {moderated, [sequence], [
                             moderated_simple,
                             moderated_denied
+                        ]},
+             {code, [sequence], [
+                            code_sample,
+                            code_remove,
+                            code_edit
                         ]}
             ].
 
@@ -72,6 +78,12 @@ init_per_group(basic, Config) ->
     start_room(Config1, Alice, <<"testroom">>, <<"testowner">>,
         [{persistent, true}]);
 
+init_per_group(code, Config) ->
+    Config1 = escalus:create_users(Config),
+    [Alice | _] = ?config(escalus_users, Config1),
+    start_room(Config1, Alice, <<"testroom">>, <<"testowner">>,
+        [{persistent, true}]);
+
 init_per_group(moderated, Config) ->
       RoomName = <<"testroom">>,
       RoomNick = <<"testowner">>,
@@ -88,6 +100,10 @@ end_per_group(basic, Config) ->
     destroy_room(Config),
     escalus:delete_users(Config);
 
+end_per_group(code, Config) ->
+    destroy_room(Config),
+    escalus:delete_users(Config);
+
 end_per_group(moderated, Config) ->
       destroy_room(Config),
       escalus:delete_users(Config);
@@ -101,7 +117,6 @@ init_per_testcase(CaseName, Config) ->
 end_per_testcase(CaseName, Config) ->
     timer:sleep(1000),
     escalus:end_per_testcase(CaseName, Config).
-
 
 basic_emptystate(Config) ->
     escalus:story(Config, [1], fun(Alice) ->
@@ -189,6 +204,7 @@ basic_removeorphans(Config) ->
         El1 = stanza_new_node({text, <<"line-4">>, <<"line">>, <<"line-1">>, <<"Well, hey, this is text too!">>}),
         El2 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"line-4">>, <<"This is text">>}),
         El3 = stanza_new_node({text, <<"line-6">>, <<"line">>, <<"document">>, <<"True magic">>}),
+        El4 = stanza_new_node({text, <<"line-4">>, <<"line">>, <<"document">>, <<"Well, hey, this is text too!">>}),
         Packet = stanza_nodes([El1, El2, El3]),
         escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
         Msg2 = escalus:wait_for_stanza(Alice),
@@ -216,8 +232,9 @@ basic_removeorphans(Config) ->
         Msg1 = get_message(escalus:wait_for_stanzas(Mike, 5)),
         false = has_state_element(Msg1, El0),
         false = has_state_element(Msg1, El1),
-        false = has_state_element(Msg1, El2),
-        true = has_state_element(Msg1, El3)
+        true = has_state_element(Msg1, El2),
+        true = has_state_element(Msg1, El3),
+        true = has_state_element(Msg1, El4)
     end).
 
 moderated_simple(Config) ->        
@@ -280,9 +297,140 @@ moderated_denied(Config) ->
         escalus_assert:has_no_stanzas(Alice)
     end).
 
+code_sample(Config) ->
+    escalus:story(Config, [1, 1], fun(Alice, Bob) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        El1 = stanza_new_node({text, <<"line-1">>, <<"line">>, <<"document">>, <<"-module(test).">>}),
+        El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"-export([fac/1]).">>}),
+        El3 = stanza_new_node({element, <<"line-3">>, <<"line">>, <<"document">>}),
+        El4 = stanza_new_node({text, <<"line-4">>, <<"line">>, <<"document">>, <<"fac(0) ->">>}),
+        El5 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"line-4">>, <<"1;">>}),
+        El6 = stanza_new_node({text, <<"line-6">>, <<"line">>, <<"document">>, <<"fac(N) ->">>}),
+        El7 = stanza_new_node({text, <<"line-7">>, <<"line">>, <<"line-6">>, <<"N * fac(N-1).">>}),
+        Packet = stanza_nodes([El1, El2, El3, El4, El5, El6, El7]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        escalus:wait_for_stanza(Alice),
+
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
+        true = has_state_element(Msg, El1),
+        true = has_state_element(Msg, El2),
+        true = has_state_element(Msg, El3),
+        true = has_state_element(Msg, El4),
+        true = has_state_element(Msg, El5),
+        true = has_state_element(Msg, El6),
+        true = has_state_element(Msg, El7),
+
+        Doc = recover_state(Msg),
+
+        {ok, Doc2} = exml:parse(<<"<document id=\"line-0\">"
+                "<line id=\"line-1\">-module(test).</line>"
+                "<line id=\"line-2\">-export([fac/1]).</line>"
+                "<line id=\"line-3\"/>"
+                "<line id=\"line-4\">fac(0) -></line>"
+                "<line id=\"line-5\" parent=\"line-4\">1;</line>"
+                "<line id=\"line-6\">fac(N) -></line>"
+                "<line id=\"line-7\" parent=\"line-6\">N * fac(N-1).</line>"
+                "</document>">>),
+        Doc = Doc2
+    end).
+
+code_remove(Config) ->
+    escalus:story(Config, [1, 1], fun(Alice, Bob) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        El1 = stanza_new_node({text, <<"line-1">>, <<"line">>, <<"document">>, <<"-module(test).">>}),
+        El2 = stanza_new_node({text, <<"line-2">>, <<"line">>, <<"document">>, <<"-export([fac/1]).">>}),
+        El3 = stanza_new_node({element, <<"line-3">>, <<"line">>, <<"document">>}),
+        El4 = stanza_new_node({text, <<"line-4">>, <<"line">>, <<"document">>, <<"fac(0) ->">>}),
+        El5 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"line-4">>, <<"1;">>}),
+        El6 = stanza_new_node({text, <<"line-6">>, <<"line">>, <<"document">>, <<"fac(N) ->">>}),
+        El7 = stanza_new_node({text, <<"line-7">>, <<"line">>, <<"line-6">>, <<"N * fac(N-1).">>}),
+        El8 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"document">>, <<"1;">>}),
+        RemEl1 = stanza_remove(<<"line-3">>),
+        RemEl2 = stanza_remove(<<"line-4">>),
+        Packet = stanza_nodes([RemEl1, RemEl2]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        escalus:wait_for_stanza(Alice),
+
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
+        true = has_state_element(Msg, El1),
+        true = has_state_element(Msg, El2),
+        false= has_state_element(Msg, El3),
+        false = has_state_element(Msg, El4),
+        false = has_state_element(Msg, El5),
+        true = has_state_element(Msg, El6),
+        true = has_state_element(Msg, El7),
+        true = has_state_element(Msg, El8),
+
+        Doc = recover_state(Msg),
+
+        {ok, Doc2} = exml:parse(<<"<document id=\"line-0\">"
+                "<line id=\"line-1\">-module(test).</line>"
+                "<line id=\"line-2\">-export([fac/1]).</line>"
+                "<line id=\"line-5\">1;</line>"
+                "<line id=\"line-6\">fac(N) -></line>"
+                "<line id=\"line-7\" parent=\"line-6\">N * fac(N-1).</line>"
+                "</document>">>),
+        Doc = Doc2
+    end).
+
+code_edit(Config) ->
+    escalus:story(Config, [1, 1], fun(Alice, Bob) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        El = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"document">>, <<"1;">>}),
+        El1 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"document">>, <<"15;">>}),
+        EditEl = stanza_set(<<"line-5">>, [{<<"chdata">>, <<"15;">>}]),
+        Packet = stanza_nodes([EditEl]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        escalus:wait_for_stanza(Alice),
+
+        escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
+        Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
+        false = has_state_element(Msg, El),
+        true = has_state_element(Msg, El1),
+        
+        Doc = recover_state(Msg),
+
+        {ok, Doc2} = exml:parse(<<"<document id=\"line-0\">"
+                "<line id=\"line-1\">-module(test).</line>"
+                "<line id=\"line-2\">-export([fac/1]).</line>"
+                "<line id=\"line-5\">15;</line>"
+                "<line id=\"line-6\">fac(N) -></line>"
+                "<line id=\"line-7\" parent=\"line-6\">N * fac(N-1).</line>"
+                "</document>">>),
+        Doc = Doc2
+    end).
 %%--------------------------------------------------------------------
 %% Helpers
 %%--------------------------------------------------------------------
+
+recover_state(Msg) ->
+    Items = (exml_query:path(Msg, [{element, <<"sxe">>}, {element, <<"state">>}]))#xmlelement.children,
+    Items1 = lists:filter(fun(#xmlelement{} = Item) -> exml_query:attr(Item, <<"parent">>) /= undefined;
+                             (_) -> false end, Items),
+    Items2 = lists:sort(fun(Item1, Item2) -> exml_query:attr(Item1, <<"rid">>) > exml_query:attr(Item2, <<"rid">>) end, Items1),
+    Children = lists:foldl(fun(#xmlelement{name = <<"new">>} = Item, Acc) ->
+            Attrs = [{<<"id">>, exml_query:attr(Item, <<"rid">>)}],
+            Attrs1 = case exml_query:attr(Item, <<"parent">>) of
+                <<"document">> -> Attrs;
+            Parent -> Attrs ++ [{<<"parent">>, Parent}]
+            end,
+            Children = case exml_query:attr(Item, <<"type">>) of
+                <<"text">> ->
+                    [#xmlcdata{content = exml_query:attr(Item, <<"chdata">>)}];
+                _ ->
+                    []
+            end,
+            [#xmlelement{name = exml_query:attr(Item, <<"name">>), attrs = Attrs1, children = Children} | Acc];
+        (_, Acc) -> Acc end, [], Items2),
+    #xmlelement{name = <<"document">>,
+                attrs = [{<<"id">>, <<"line-0">>}],
+                children = Children}.
+
 get_message(Stanzas) ->
     [Msg] = lists:filter(fun(#xmlelement{name = <<"message">>} = El) ->
                             case exml_query:attr(El, <<"type">>) of
