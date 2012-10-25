@@ -55,7 +55,8 @@ groups() -> [
              {code, [sequence], [
                             code_sample,
                             code_remove,
-                            code_edit
+                            code_edit,
+                            code_new
                         ]}
             ].
 
@@ -385,8 +386,10 @@ code_edit(Config) ->
         El1 = stanza_new_node({text, <<"line-5">>, <<"line">>, <<"document">>, <<"15;">>}),
         EditEl = stanza_set(<<"line-5">>, [{<<"chdata">>, <<"15;">>}]),
         Packet = stanza_nodes([EditEl]),
+        error_logger:info_msg("~p~n", [exml:to_binary(Packet)]),
         escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
-        escalus:wait_for_stanza(Alice),
+        Stanza = escalus:wait_for_stanza(Alice),
+        error_logger:info_msg("~p~n", [exml:to_binary(Stanza)]),
 
         escalus:send(Bob, stanza_muc_enter_room(?config(room, Config), <<"bob">>)),
         Msg = get_message(escalus:wait_for_stanzas(Bob, 4)),
@@ -403,6 +406,17 @@ code_edit(Config) ->
                 "<line id=\"line-7\" parent=\"line-6\">N * fac(N-1).</line>"
                 "</document>">>),
         Doc = Doc2
+    end).
+
+code_new(Config) ->
+    escalus:story(Config, [1], fun(Alice) ->
+        escalus:send(Alice, stanza_muc_enter_room(?config(room, Config), <<"alice">>)),
+        escalus:wait_for_stanzas(Alice, 3),
+        El = stanza_new_node({text, <<"line-8">>, <<"line">>, <<"document">>, <<"%% factorial">>}),
+        Packet = stanza_nodes([El]),
+        escalus:send(Alice, stanza_to_room(Packet, ?config(room, Config))),
+        Msg = escalus:wait_for_stanza(Alice),
+        true = has_element(Msg, El)
     end).
 %%--------------------------------------------------------------------
 %% Helpers
